@@ -1,0 +1,174 @@
+'''
+Here is the okex api example.
+
+'''
+import okex.v5.account_api as account
+import okex.v5.market_api as market
+import okex.v5.public_api as public
+import okex.v5.trade_api as trade
+import json
+import datetime
+
+import pandas as pd
+import ta
+from ta.trend import EMAIndicator
+import schedule
+import time
+import logging
+import warnings
+warnings.filterwarnings("ignore")
+pd.set_option('display.max_rows',None)
+
+#输出日志文件
+logging.basicConfig(level=logging.INFO,#控制台打印的日志级别
+                    filename='new.log',
+                    filemode='a',##模式，有w和a，w就是写模式，每次都会重新写日志，覆盖之前的日志
+                    #a是追加模式，默认如果不写的话，就是追加模式
+                    format=
+                    '%(asctime)s %(message)s'
+                    #日志格式
+                    )
+def get_usdt_balance():
+    # account api test
+    accountAPI = account.AccountAPI(api_key, secret_key, passphrase, False, test=test)
+    accountAPI.set_api_url("https://www.okex.com")
+    # usdt balance
+    usdt = accountAPI.balance()[0]['details'][0]['cashBal']
+    return usdt
+
+def get_coin_balance():
+    # account api test
+    accountAPI = account.AccountAPI(api_key, secret_key, passphrase, False, test=test)
+    accountAPI.set_api_url("https://www.okex.com")
+    # usdt balance
+    coin = accountAPI.balance()[0]['details'][0]['cashBal']
+    return coin
+
+def get_last_price(instId):
+    # market
+    marketAPI = market.MarketAPI(api_key, secret_key, passphrase, False, test=test)
+    marketAPI.set_api_url("https://www.okex.com")
+    price = marketAPI.ticker(instId)['last'][0]
+    return price
+
+#default market order, no price needed
+def place_order(intstId, sz, px):
+    # trade
+    from okex.v5.trade_api import TdMode, OrderType
+    tradeAPI = trade.TradeAPI(api_key, secret_key, passphrase, False, test=test)
+    tradeAPI.set_api_url("https://www.okex.com")
+    price = str.format('%f'% px)
+    result = tradeAPI.order(intstId, TdMode.CASH, OrderType.LIMIT, sz = sz, px = price)
+    return result
+
+def get_coin_balance_and_sell():
+    coin_amount = float(get_coin_balance())*-1
+    price = float(get_last_price('TRX-USDT'))*0.99
+    #sell all coin
+    if abs(coin_amount) > 1:
+        order = place_order('TRX-USDT',coin_amount, price)
+        return order
+
+def get_usdt_balance_and_buy():
+    usdt = float(get_usdt_balance())
+    price = float(get_last_price('TRX-USDT'))*1.01
+    #buy all coin
+    buy_amount = usdt/price
+    print(buy_amount)
+    if buy_amount > 0.1:
+        order = place_order('TRX-USDT', buy_amount, price)
+        return order
+
+
+#every 5min, check in_uptrend
+def get_info(instId = 'TRX-USDT', period = '5m', atr_period = 7, multiplier = 3):
+    # market
+    marketAPI = market.MarketAPI(api_key, secret_key, passphrase, False, test=test)
+    marketAPI.set_api_url("https://www.okex.com")
+    df = marketAPI.candles(instId=instId, bar= period).sort_values(by='ts', ascending=True)
+    df['previous_close'] = df['c'].shift(1)
+    df['high-low'] = df['h'] - df['l']
+    df['high-pc'] = abs(df['h'] - df['previous_close'])
+    df['low-pc'] = abs(df['l'] - df['previous_close'])
+    df['tr'] = df[['high-low', 'high-pc', 'low-pc']].max(axis = 1)
+    df['atr'] = df['tr'].rolling(atr_period).mean()
+    df['upperband'] = ((df['h'] + df['l'])/2) + (multiplier * df['atr'])
+    df['lowerband'] = ((df['h'] + df['l'])/2) - (multiplier * df['atr'])
+    df['in_uptrend'] = True
+    for current in range(1, len(df.index)):
+        previous = current - 1
+        if(df['c'][current] > df['upperband'][previous]):
+            df['in_uptrend'][current] = True
+        elif df['c'][current] < df['lowerband'][previous]:
+            df['in_uptrend'][current] = False
+        else:
+            df['in_uptrend'][current] = df['in_uptrend'][previous]
+            if df['in_uptrend'][current] and df['lowerband'][current] < df['lowerband'][previous]:
+                df['lowerband'][current] = df['lowerband'][previous]
+            if not df['in_uptrend'][current] and df['upperband'][current] > df['upperband'][previous]:
+                df['upperband'][current] = df['upperband'][previous]
+    return df
+
+def init():
+    global is_empty
+    # account api test
+    accountAPI = account.AccountAPI(api_key, secret_key, passphrase, False, test=False)
+    accountAPI.set_api_url("https://www.okex.com")
+    if  accountAPI.balance()[0]['details'][0]['ccy'] == 'USDT':
+        is_empty = True #is_empty True, hold usdt; is_empyt False, hold coin
+def supertrend_check(df):
+    global is_empty
+    current = 0
+    previous = 1
+    print("previous trend:",df['in_uptrend'][previous])
+    print("current trend:",df['in_uptrend'][current])
+    if df['in_uptrend'][previous] and df['in_uptrend'][current]:
+        logging.info("in uptrend, keep full or buy all")
+        print('"in uptrend, keep full or buy all"')
+        if is_empty:
+            get_usdt_balance_and_buy()
+            #after buy in, set is_empyt = false
+            is_empty = False
+            print("buy all now")
+
+    if df['in_uptrend'][previous] and not df['in_uptrend'][current]:
+        logging.info("turn to downtrend, keep empyt or sell all")
+        if not is_empty:
+            get_coin_balance_and_sell()
+            is_empty = True
+            print('sell all now')
+
+    if not df['in_uptrend'][previous] and not df['in_uptrend'][current]:
+        logging.info("downtrend, keep empyt or sell all")
+        print("downtrend, keep empyt or sell all")
+        if not is_empty:
+            get_coin_balance_and_sell()
+            #after buy in, set is_empyt = false
+            is_empty = True
+            print("sell all now")
+
+    if not df['in_uptrend'][previous] and df['in_uptrend'][current]:
+        logging.info("turn to uptrend, keep full or buy all")
+        if is_empty:
+            get_usdt_balance_and_buy()
+            is_empty = False
+            print('buy all now')
+def run():
+    df = get_info('TRX-USDT','5m')
+    supertrend_check(df)
+
+if __name__ == '__main__':
+    global is_empty
+    #key
+    with open('api.json', 'r', encoding='utf-8') as f:
+        obj = json.loads(f.read())
+    api_key = obj['api_key']
+    secret_key = obj['secret_key']
+    passphrase = obj['passphrase']
+    #init api count parameter
+    init()
+    test = False  # shipan mode
+    schedule.every(20).seconds.do(run)
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
